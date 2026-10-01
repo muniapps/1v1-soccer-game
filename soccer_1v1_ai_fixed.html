@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>1v1 Soccer Showdown</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#08120b;font-family:Arial,sans-serif}
+#hud{position:fixed;z-index:5;top:14px;left:50%;transform:translateX(-50%);color:#fff;text-align:center;pointer-events:none;text-shadow:0 2px 5px #000}
+#score{font-size:34px;font-weight:800;letter-spacing:3px}
+#help{font-size:14px;margin-top:5px;opacity:.9}
+#status{font-size:16px;margin-top:8px;font-weight:700}
+#crosshair{position:fixed;z-index:6;pointer-events:none;width:18px;height:18px;border:2px solid rgba(255,255,255,.8);border-radius:50%;transform:translate(-50%,-50%);display:none}
+#start{position:fixed;inset:0;z-index:10;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;color:white;text-align:center}
+.card{background:rgba(12,20,16,.96);padding:30px 36px;border-radius:18px;max-width:520px;box-shadow:0 15px 60px #000}
+.card h1{margin:0 0 10px;font-size:38px}
+.card p{line-height:1.55;color:#ddd}
+button{border:0;border-radius:10px;padding:13px 24px;font-size:17px;font-weight:700;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="score">YOU 0 — 0 AI</div>
+  <div id="help">W A S D = move &nbsp; • &nbsp; Mouse = aim &nbsp; • &nbsp; Left click = shoot</div>
+  <div id="status"></div>
+</div>
+<div id="crosshair"></div>
+<div id="start">
+  <div class="card">
+    <h1>1v1 Soccer Showdown</h1>
+    <p>No goalkeeper. Beat the AI by putting the ball through the goal opening.<br>
+    Stand in the ball's path to deflect it, but don't expect teleporting ball physics!</p>
+    <button id="startBtn">START MATCH</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.179.1/+esm";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x07110b);
+scene.fog = new THREE.Fog(0x07110b, 28, 70);
+
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, .1, 150);
+camera.position.set(0,18,18);
+camera.lookAt(0,0,0);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const clock = new THREE.Clock();
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const aimPoint = new THREE.Vector3(0,0,0);
+const groundPlane = new THREE.Plane(new THREE.Vector3(0,1,0),0);
+
+const FIELD_W = 34, FIELD_D = 22;
+const GOAL_D = 3.2, GOAL_W = 3.6, GOAL_H = 3.0;
+const PLAYER_R = .65, BALL_R = .38;
+const MAX_X = FIELD_W/2 - 1.0, MAX_Z = FIELD_D/2 - 1.0;
+
+let playerScore=0, aiScore=0, started=false, gameOver=false;
+
+const hemi = new THREE.HemisphereLight(0xbfe9ff,0x173019,2.1);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff,2.6);
+sun.position.set(-10,25,12);
+sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);
+sun.shadow.camera.left=-28; sun.shadow.camera.right=28;
+sun.shadow.camera.top=28; sun.shadow.camera.bottom=-28;
+scene.add(sun);
+
+function box(w,h,d,color, x=0,y=0,z=0, materialOpts={}){
+  const m=new THREE.MeshStandardMaterial({color,...materialOpts});
+  const o=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
+  o.position.set(x,y,z); o.castShadow=true; o.receiveShadow=true; scene.add(o); return o;
+}
+
+const grass=box(FIELD_W,.15,FIELD_D,0x197a3a,0,-.08,0);
+const inner=box(FIELD_W-1,.02,FIELD_D-1,0x16833d,0,.01,0);
+inner.material.roughness=1;
+
+const lineMat=new THREE.MeshBasicMaterial({color:0xffffff});
+function line(x,z,w,d){
+  const o=new THREE.Mesh(new THREE.BoxGeometry(w,.025,d),lineMat);
+  o.position.set(x,.035,z); scene.add(o);
+}
+line(0,0,.06,FIELD_D);
+line(-FIELD_W/2+4,0,.05,FIELD_D);
+line(FIELD_W/2-4,0,.05,FIELD_D);
+const centerRing=new THREE.Mesh(new THREE.RingGeometry(2.8,2.86,64),new THREE.MeshBasicMaterial({color:0xffffff,side:THREE.DoubleSide}));
+centerRing.rotation.x=-Math.PI/2; centerRing.position.y=.04; scene.add(centerRing);
+
+function createGoal(x, facing){
+  const group=new THREE.Group();
+  const mat=new THREE.MeshStandardMaterial({color:0xffffff,roughness:.55,metalness:.15});
+  const px=x, back=x + facing*GOAL_D;
+  for(const z of [-GOAL_W/2,GOAL_W/2]){
+    const post=new THREE.Mesh(new THREE.CylinderGeometry(.11,.11,GOAL_H,12),mat);
+    post.position.set(px,GOAL_H/2,z); post.castShadow=true; group.add(post);
+  }
+  const cross=new THREE.Mesh(new THREE.CylinderGeometry(.11,.11,GOAL_W,12),mat);
+  cross.rotation.x=Math.PI/2; cross.position.set(px,GOAL_H,0); cross.castShadow=true; group.add(cross);
+
+  const netMat=new THREE.MeshBasicMaterial({color:0xdde7dd,transparent:true,opacity:.25,wireframe:true});
+  const net=new THREE.Mesh(new THREE.BoxGeometry(GOAL_D,GOAL_H,GOAL_W),netMat);
+  net.position.set((px+back)/2,GOAL_H/2,0); group.add(net);
+
+  // Goal floor
+  const floor=new THREE.Mesh(new THREE.BoxGeometry(GOAL_D,.03,GOAL_W),new THREE.MeshStandardMaterial({color:0xeeeeee,transparent:true,opacity:.14}));
+  floor.position.set((px+back)/2,.02,0); group.add(floor);
+  scene.add(group);
+}
+createGoal(-FIELD_W/2,-1);
+createGoal(FIELD_W/2,1);
+
+// Side boundary walls; goal mouths remain open.
+const wallMat=new THREE.MeshStandardMaterial({color:0x0d4425,transparent:true,opacity:.28});
+box(.2,.7,FIELD_D,0x0d4425,-FIELD_W/2-.1,.35,0,{transparent:true,opacity:.22});
+box(.2,.7,FIELD_D,0x0d4425, FIELD_W/2+.1,.35,0,{transparent:true,opacity:.22});
+box(FIELD_W,.7,.2,0x0d4425,0,.35,-FIELD_D/2-.1,{transparent:true,opacity:.22});
+box(FIELD_W,.7,.2,0x0d4425,0,.35, FIELD_D/2+.1,{transparent:true,opacity:.22});
+
+function makePlayer(color, skin, shirtNumber){
+  const g=new THREE.Group();
+  const shirt=new THREE.MeshStandardMaterial({color,roughness:.8});
+  const skinM=new THREE.MeshStandardMaterial({color:skin,roughness:.75});
+  const shorts=new THREE.MeshStandardMaterial({color:0x111318,roughness:.9});
+  const shoe=new THREE.MeshStandardMaterial({color:0xffffff,roughness:.5});
+
+  const torso=new THREE.Mesh(new THREE.CapsuleGeometry(.48,.9,6,10),shirt);
+  torso.position.y=1.25; torso.castShadow=true; g.add(torso);
+
+  const head=new THREE.Mesh(new THREE.SphereGeometry(.34,18,14),skinM);
+  head.position.y=2.35; head.castShadow=true; g.add(head);
+
+  const shortsM=new THREE.Mesh(new THREE.BoxGeometry(.78,.35,.5),shorts);
+  shortsM.position.y=.72; shortsM.castShadow=true; g.add(shortsM);
+
+  for(const s of [-1,1]){
+    const leg=new THREE.Mesh(new THREE.CapsuleGeometry(.13,.72,5,8),skinM);
+    leg.position.set(s*.2,.35,0); leg.rotation.z=s*.06; leg.castShadow=true; g.add(leg);
+    const foot=new THREE.Mesh(new THREE.BoxGeometry(.26,.14,.46),shoe);
+    foot.position.set(s*.2,.05,.13); foot.castShadow=true; g.add(foot);
+    const arm=new THREE.Mesh(new THREE.CapsuleGeometry(.11,.6,5,8),skinM);
+    arm.position.set(s*.58,1.28,0); arm.rotation.z=-s*.35; arm.castShadow=true; g.add(arm);
+  }
+
+  // tiny number plate for visual differentiation
+  const numCanvas=document.createElement("canvas");
+  numCanvas.width=128; numCanvas.height=128;
+  const ctx=numCanvas.getContext("2d");
+  ctx.fillStyle="#ffffff"; ctx.font="bold 80px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText(String(shirtNumber),64,66);
+  const tex=new THREE.CanvasTexture(numCanvas);
+  const badge=new THREE.Mesh(new THREE.PlaneGeometry(.32,.32),new THREE.MeshBasicMaterial({map:tex,transparent:true}));
+  badge.position.set(0,1.35,-.49); badge.rotation.y=Math.PI; g.add(badge);
+  return g;
+}
+
+const player={mesh:makePlayer(0x1f73ff,0xffc69a,10),pos:new THREE.Vector3(-8,0,0),vel:new THREE.Vector3(),speed:5.6};
+const ai={mesh:makePlayer(0xe63232,0xffc69a,9),pos:new THREE.Vector3(8,0,0),vel:new THREE.Vector3(),speed:3.2};
+player.mesh.position.copy(player.pos); ai.mesh.position.copy(ai.pos);
+scene.add(player.mesh); scene.add(ai.mesh);
+
+const ballMat=new THREE.MeshStandardMaterial({color:0xf7f7f7,roughness:.42,metalness:.05});
+const ball=new THREE.Mesh(new THREE.SphereGeometry(BALL_R,28,20),ballMat);
+ball.position.set(0,.42,0); ball.castShadow=true; scene.add(ball);
+const ballVel=new THREE.Vector3();
+const ballSpin=new THREE.Vector3();
+
+const keys={};
+addEventListener("keydown",e=>{keys[e.key.toLowerCase()]=true;if(e.key===" ")e.preventDefault()});
+addEventListener("keyup",e=>keys[e.key.toLowerCase()]=false);
+
+function updateAim(e){
+  mouse.x=(e.clientX/innerWidth)*2-1;
+  mouse.y=-(e.clientY/innerHeight)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const hit=raycaster.ray.intersectPlane(groundPlane,aimPoint);
+  if(hit){
+    aimPoint.x=THREE.MathUtils.clamp(aimPoint.x,-FIELD_W/2,FIELD_W/2);
+    aimPoint.z=THREE.MathUtils.clamp(aimPoint.z,-FIELD_D/2,FIELD_D/2);
+    const ch=document.getElementById("crosshair");
+    ch.style.left=e.clientX+"px"; ch.style.top=e.clientY+"px";
+  }
+}
+addEventListener("mousemove",e=>{if(started)updateAim(e)});
+addEventListener("click",e=>{
+  if(!started || gameOver || e.target.tagName==="BUTTON") return;
+  shootPlayer();
+});
+
+function shootPlayer(){
+  const d=player.mesh.position.distanceTo(ball.position.clone().setY(0));
+  if(d>1.35) return;
+  const dir=new THREE.Vector3(aimPoint.x-ball.position.x,0,aimPoint.z-ball.position.z);
+  if(dir.lengthSq()<.01) return;
+  dir.normalize();
+  const power=10.5;
+  ballVel.set(dir.x*power,4.0,dir.z*power);
+  ballSpin.set(0,(dir.z*2.2-dir.x*1.2),0);
+  ball.position.y=Math.max(ball.position.y,.42);
+}
+
+function moveHuman(dt){
+  const dir=new THREE.Vector3(
+    (keys.d?1:0)-(keys.a?1:0),
+    0,
+    (keys.s?1:0)-(keys.w?1:0)
+  );
+  if(dir.lengthSq()>0) dir.normalize();
+  player.vel.lerp(dir.multiplyScalar(player.speed),1-Math.pow(.001,dt));
+  player.pos.addScaledVector(player.vel,dt);
+  player.pos.x=THREE.MathUtils.clamp(player.pos.x,-MAX_X,MAX_X);
+  player.pos.z=THREE.MathUtils.clamp(player.pos.z,-MAX_Z,MAX_Z);
+  player.mesh.position.copy(player.pos);
+  if(player.vel.lengthSq()>.04) player.mesh.rotation.y=Math.atan2(player.vel.x,player.vel.z);
+}
+
+let aiShotTimer=0.4;
+let aiThinkTimer=0;
+
+function moveAI(dt){
+  const ballXZ = new THREE.Vector3(ball.position.x,0,ball.position.z);
+  const distance = ai.pos.distanceTo(ballXZ);
+
+  // The AI is allowed to roam over the ENTIRE field.
+  // It actively chases the ball instead of being restricted to its half.
+  const predicted = ballXZ.clone().add(
+    new THREE.Vector3(ballVel.x,0,ballVel.z).multiplyScalar(.45)
+  );
+
+  let target = predicted.clone();
+
+  // When close to the ball, position slightly behind it so the AI can kick
+  // toward the user's goal on the left.
+  if(distance < 2.6){
+    target.x = ball.position.x + .75;
+    target.z = ball.position.z;
+  }
+
+  target.x=THREE.MathUtils.clamp(target.x,-MAX_X,MAX_X);
+  target.z=THREE.MathUtils.clamp(target.z,-MAX_Z,MAX_Z);
+
+  const toTarget=target.clone().sub(ai.pos);
+  toTarget.y=0;
+
+  if(toTarget.lengthSq()>0.02) toTarget.normalize();
+
+  // Full-speed chase. It can cross midfield.
+  const desiredSpeed = distance < 3.0 ? 3.8 : 4.6;
+  ai.vel.lerp(toTarget.multiplyScalar(desiredSpeed),1-Math.pow(.0005,dt));
+  ai.pos.addScaledVector(ai.vel,dt);
+
+  ai.pos.x=THREE.MathUtils.clamp(ai.pos.x,-MAX_X,MAX_X);
+  ai.pos.z=THREE.MathUtils.clamp(ai.pos.z,-MAX_Z,MAX_Z);
+  ai.mesh.position.copy(ai.pos);
+
+  if(ai.vel.lengthSq()>.04)
+    ai.mesh.rotation.y=Math.atan2(ai.vel.x,ai.vel.z);
+
+  // Continuously reassess the ball.
+  aiThinkTimer-=dt;
+  if(aiThinkTimer<=0){
+    aiThinkTimer=.08;
+
+    const kickDistance=ai.pos.distanceTo(
+      new THREE.Vector3(ball.position.x,0,ball.position.z)
+    );
+
+    // AI kicks whenever it gets close enough, regardless of which half
+    // the ball is currently in.
+    if(kickDistance < 1.7 && aiShotTimer<=0){
+      aiShoot();
+      aiShotTimer=.55+Math.random()*.75;
+    }
+  }
+
+  aiShotTimer-=dt;
+}
+
+function aiShoot(){
+  // Aim directly at the user's LEFT goal, with a changing target point.
+  const targetZ=(Math.random()-.5)*(GOAL_W*.78);
+  const target=new THREE.Vector3(
+    -FIELD_W/2-GOAL_D*.2,
+    0,
+    targetZ
+  );
+
+  const dir=target.clone().sub(ball.position);
+  dir.y=0;
+
+  if(dir.lengthSq()<.001) dir.set(-1,0,0);
+  else dir.normalize();
+
+  const power=9.5+Math.random()*4.0;
+
+  ballVel.set(
+    dir.x*power,
+    3.0+Math.random()*1.8,
+    dir.z*power
+  );
+
+  // Give AI kicks some curve/spin.
+  ballSpin.set(
+    0,
+    (Math.random()-.5)*5.5,
+    0
+  );
+
+  // Make sure the ball starts on the AI's attacking side of the player,
+  // without teleporting it.
+  ball.position.y=Math.max(ball.position.y,BALL_R+.02);
+}
+
+function playerCollision(p,dt){
+  const bp=new THREE.Vector3(ball.position.x,0,ball.position.z);
+  const delta=bp.clone().sub(p.pos);
+  const dist=delta.length();
+  const min=PLAYER_R+BALL_R;
+  if(dist<min){
+    const n=dist>.001?delta.normalize():new THREE.Vector3(p===player?1:-1,0,0);
+    // Keep the ball near its current location: only a small separation correction.
+    const correction=min-dist+.012;
+    ball.position.x+=n.x*correction;
+    ball.position.z+=n.z*correction;
+
+    const vn=ballVel.x*n.x+ballVel.z*n.z;
+    if(vn<0) {
+      ballVel.x-=1.85*vn*n.x;
+      ballVel.z-=1.85*vn*n.z;
+    }
+    ballVel.multiplyScalar(.38);
+    ballVel.y*=.65;
+    ballSpin.y += (n.x*p.vel.z-n.z*p.vel.x)*1.0;
+    ballSpin.multiplyScalar(.65);
+  }
+}
+
+function physics(dt){
+  // Gravity
+  ballVel.y-=10.8*dt;
+
+  // Spin / Magnus-like curve. More spin = stronger lateral movement.
+  const spinY=ballSpin.y;
+  ballVel.x += (-spinY*ballVel.z)*0.028*dt;
+  ballVel.z += ( spinY*ballVel.x)*0.028*dt;
+
+  // Air drag, slightly increased with spin.
+  const drag=Math.pow(0.985+Math.min(.012,Math.abs(spinY)*.0007),dt*60);
+  ballVel.x*=drag; ballVel.z*=drag;
+
+  ball.position.addScaledVector(ballVel,dt);
+
+  // Ground bounce and rolling.
+  if(ball.position.y< BALL_R){
+    ball.position.y=BALL_R;
+    if(ballVel.y<0){
+      ballVel.y*=-.52;
+      ballVel.x*=.91; ballVel.z*=.91;
+      ballSpin.y*=.92;
+    }
+    if(Math.abs(ballVel.y)<.35) ballVel.y=0;
+  }
+
+  // Side walls.
+  if(ball.position.z>FIELD_D/2-BALL_R){
+    ball.position.z=FIELD_D/2-BALL_R;
+    ballVel.z=-Math.abs(ballVel.z)*.72;
+    ballSpin.y*=-.78;
+  }
+  if(ball.position.z<-FIELD_D/2+BALL_R){
+    ball.position.z=-FIELD_D/2+BALL_R;
+    ballVel.z=Math.abs(ballVel.z)*.72;
+    ballSpin.y*=-.78;
+  }
+
+  // End lines except goal mouth.
+  const mouth=Math.abs(ball.position.z)<GOAL_W/2;
+  if(ball.position.x>FIELD_W/2-BALL_R && !mouth){
+    ball.position.x=FIELD_W/2-BALL_R;
+    ballVel.x=-Math.abs(ballVel.x)*.72;
+    ballSpin.y*=-.65;
+  }
+  if(ball.position.x<-FIELD_W/2+BALL_R && !mouth){
+    ball.position.x=-FIELD_W/2+BALL_R;
+    ballVel.x=Math.abs(ballVel.x)*.72;
+    ballSpin.y*=-.65;
+  }
+
+  // Goal detection: count the goal as soon as the ball crosses the goal line.
+  // Also count it if it has already travelled inside the goal.
+  const inGoalMouth = Math.abs(ball.position.z) <= GOAL_W/2 + BALL_R;
+  if(inGoalMouth && ball.position.x >= FIELD_W/2 - BALL_R){
+    score("player"); return;
+  }
+  if(inGoalMouth && ball.position.x <= -FIELD_W/2 + BALL_R){
+    score("ai"); return;
+  }
+  if(inGoalMouth && ball.position.x > FIELD_W/2 + .15){
+    score("player"); return;
+  }
+  if(inGoalMouth && ball.position.x < -FIELD_W/2 - .15){
+    score("ai"); return;
+  }
+
+  // Rolling slowdown; weak shots naturally die.
+  if(ball.position.y<=BALL_R+.015){
+    const horiz=Math.hypot(ballVel.x,ballVel.z);
+    if(horiz<1.2){
+      ballVel.x*=Math.pow(.94,dt*60);
+      ballVel.z*=Math.pow(.94,dt*60);
+    }
+  }
+
+  // Spin decay.
+  ballSpin.multiplyScalar(Math.pow(.94,dt*60));
+
+  // Visual rotation.
+  ball.rotation.x += ballSpin.z*dt + ballVel.z*dt*.7;
+  ball.rotation.z -= ballSpin.x*dt + ballVel.x*dt*.7;
+  ball.rotation.y += ballSpin.y*dt*.7;
+}
+
+function score(who){
+  if(who==="player") playerScore++; else aiScore++;
+  updateScore();
+  ballVel.set(0,0,0); ballSpin.set(0,0,0);
+  ball.position.set(0,.42,0);
+  player.pos.set(-8,0,0); ai.pos.set(8,0,0);
+  player.mesh.position.copy(player.pos); ai.mesh.position.copy(ai.pos);
+  aiShotTimer=1.4;
+  if(playerScore>=5 || aiScore>=5){
+    gameOver=true;
+    document.getElementById("status").textContent=(playerScore>aiScore?"YOU WIN!":"AI WINS!")+" — press R to restart";
+  }else{
+    document.getElementById("status").textContent="GOAL!";
+    setTimeout(()=>{if(!gameOver)document.getElementById("status").textContent="";},900);
+  }
+}
+
+function updateScore(){
+  document.getElementById("score").textContent=`YOU ${playerScore} — ${aiScore} AI`;
+}
+addEventListener("keydown",e=>{
+  if(e.key.toLowerCase()==="r" && gameOver) location.reload();
+});
+
+document.getElementById("startBtn").onclick=()=>{
+  started=true;
+  document.getElementById("start").style.display="none";
+  document.getElementById("crosshair").style.display="block";
+  document.getElementById("status").textContent="First to 5";
+};
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt=Math.min(clock.getDelta(),.033);
+  if(started && !gameOver){
+    moveHuman(dt);
+    moveAI(dt);
+    playerCollision(player,dt);
+    playerCollision(ai,dt);
+    physics(dt);
+  }
+
+  // Camera follows the action while keeping the whole field visible.
+  const desired=new THREE.Vector3(0,17.5,17.5);
+  camera.position.lerp(desired,.045);
+  camera.lookAt(0,0,0);
+  renderer.render(scene,camera);
+}
+animate();
+
+addEventListener("resize",()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
